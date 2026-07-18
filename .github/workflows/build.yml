@@ -27,37 +27,40 @@ jobs:
       - name: Install build dependencies
         run: pip install setuptools build
 
-      - name: Build egg and wheel
+      - name: Build egg
         run: |
           python setup.py bdist_egg
-          python -m build
           ls -alh dist/
 
-      - name: Get egg filename
+      - name: Get egg info
         id: egg
         run: |
           EGG_FILE=$(ls dist/*.egg)
+          EGG_NAME=$(basename ${EGG_FILE})
           echo "path=${EGG_FILE}" >> $GITHUB_OUTPUT
-          echo "name=$(basename ${EGG_FILE})" >> $GITHUB_OUTPUT
+          echo "name=${EGG_NAME}" >> $GITHUB_OUTPUT
+          echo "tarball=${EGG_NAME}.tar.gz" >> $GITHUB_OUTPUT
 
-      - name: Get wheel filename
-        id: wheel
+      - name: Extract egg and create tar.gz
         run: |
-          WHL_FILE=$(ls dist/*.whl)
-          echo "path=${WHL_FILE}" >> $GITHUB_OUTPUT
-          echo "name=$(basename ${WHL_FILE})" >> $GITHUB_OUTPUT
-
-      - name: Get md5sum
-        id: filehash
-        run: |
-          echo "egg_hash=$(md5sum ${{ steps.egg.outputs.path }} | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
-          echo "whl_hash=$(md5sum ${{ steps.wheel.outputs.path }} | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          # Extract the egg (zip) into a directory with the same name
+          mkdir -p release/${{ steps.egg.outputs.name }}
+          unzip ${{ steps.egg.outputs.path }} -d release/${{ steps.egg.outputs.name }}
+          # Create tar.gz that extracts to a directory named like the egg
+          cd release
+          tar czf ../${{ steps.egg.outputs.tarball }} ${{ steps.egg.outputs.name }}
+          cd ..
+          ls -alh ${{ steps.egg.outputs.tarball }}
+          echo "Contents:"
+          tar tzf ${{ steps.egg.outputs.tarball }} | head -20
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist-py${{ matrix.python-version }}
-          path: dist/
+          path: |
+            ${{ steps.egg.outputs.tarball }}
+            dist/*.egg
 
   release:
     needs: [build]
@@ -80,11 +83,29 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          draft: true
+          draft: false
           prerelease: false
           generate_release_notes: true
+          body: |
+            ## Installation (linuxserver/deluge)
+
+            1. Download the `.tar.gz` matching your Python version
+            2. Extract into your plugins folder:
+               ```bash
+               cd ./config/Deluge/plugins/
+               tar xzf Telegramer-2.2.0.0-py3.12.egg.tar.gz
+               ```
+            3. Add to your docker-compose environment:
+               ```yaml
+               - DOCKER_MODS=linuxserver/mods:universal-package-install
+               - INSTALL_PIP_PACKAGES=python-telegram-bot>=20.0
+               - PYTHONPATH=/lsiopy/lib/python3.12/site-packages
+               ```
+            4. Restart the container and enable in Web UI → Preferences → Plugins
+
+            Check your Python version: `docker exec <container> python3 --version`
           files: |
+            artifacts/*.tar.gz
             artifacts/*.egg
-            artifacts/*.whl
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
