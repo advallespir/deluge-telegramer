@@ -2,85 +2,119 @@
 
 <p align="center"><a href="https://github.com/noam09/deluge-telegramer" title="Telegramer"><img src="https://i.imgur.com/xXIPX44.png" alt="Telegramer"></a></p>
 
-![GitHub All Releases](https://img.shields.io/github/downloads/noam09/deluge-telegramer/total?style=flat-square) [![Deluge Version](https://img.shields.io/badge/deluge-1.3.15-blue?style=flat-square&logo=deluge)](https://github.com/noam09/deluge-telegramer/releases/tag/v1.3.1) [![Deluge Version](https://img.shields.io/badge/deluge-2.1.1-yellowgreen?style=flat-square&logo=deluge)](https://github.com/noam09/deluge-telegramer/releases/tag/2.1.1.0)
+**Fork of [noam09/deluge-telegramer](https://github.com/noam09/deluge-telegramer)**, modernized for `python-telegram-bot` v20+ and Deluge 2.2.0+.
 
-[Telegramer](https://github.com/noam09/deluge-telegramer) is a [Deluge](https://deluge-torrent.org) plugin for sending notifications, adding and viewing torrents using [Telegram](https://telegram.org/) messenger. It features both a GTK and Web UI.
+> ⚠️ **This fork does NOT work with Deluge 1.x or 2.1.x.** Deluge 2.2.0 uses a completely different plugin scanning mechanism (`importlib.metadata` + `Distribution.at()`) that is incompatible with older versions.
 
-The plugin runs a [Telegram bot](https://telegram.org/blog/bot-revolution) on the host machine which listens for commands the user sends, allowing you to list active torrents, download new torrents, and receive notifications when torrents are added to Deluge and when they finish downloading.
+---
 
-Since the bot runs locally and is owned by the same user running it, Telegramer provides the best of both worlds: [privacy](https://telegram.org/privacy) and [security](https://telegram.org/faq#security). Only you can execute your bot's commands.
-
-  * [Requirements](#requirements)
-  * [Installation](#installation)
-  * [Usage](#usage)
-  * [Development](#development)
-  * [Screenshots](#screenshots)
-  * [Known Issues](#known-issues)
-  * [License](#license)
+* [Requirements](#requirements)
+* [Installation](#installation)
+* [Bot Setup](#bot-setup)
+* [Commands](#commands)
+* [Troubleshooting](#troubleshooting)
+* [Screenshots](#screenshots)
+* [License](#license)
 
 ## Requirements
 
-Currently Telegramer has been tested mainly on Linux using Deluge 1.3.15. Support for Windows is also available. A [**beta** version](https://github.com/noam09/deluge-telegramer/releases/tag/2.1.1.0) of the plugin is available for Deluge 2, tested on v2.1.1.
-Make sure you have Python [`setuptools`](https://pypi.python.org/pypi/setuptools#installation-instructions) installed in order to build the plugin.
-The plugin itself works with the [`python-telegram-bot`](https://github.com/python-telegram-bot/python-telegram-bot) wrapper, which comes pre-packaged.
-
-Since all necessary modules are now packaged within the Python egg, there are no additional requirements.
+| Dependency | Version |
+|---|---|
+| Deluge | **2.2.0+** |
+| Python | **3.11+** |
+| python-telegram-bot | **>=20.0** |
 
 ## Installation
 
-Installing Telegramer is easy:
-* Build or download a plugin egg:
-    * Prebuilt plugin eggs can be downloaded from the [releases](https://github.com/noam09/deluge-telegramer/releases) page.
-    * If you would rather build a Python egg from source:
-        * Either [download the source code](https://github.com/noam09/deluge-telegramer/archive/master.zip) and extract the archive anywhere, or run `git clone https://github.com/noam09/deluge-telegramer.git` in a directory of your choosing.
-        * Open a Command Prompt or Terminal and navigate to the extracted archive or cloned directory.
-        * Run `python setup.py bdist_egg` to build the plugin. If you have Python 3 installed alongside Python 2, you may need to run `python2 setup.py bdist_egg` instead.
-    * To install the plugin using the Deluge graphical user interface, go to `Preferences -> Plugins` and click `Install Plugin`. Locate the plugin egg and select it to install. If you built an egg from source, you should be able to find it in the same directory to which it was extracted or cloned, inside the `dist` directory.
-    * For more detailed installation instructions, see the [Deluge wiki](http://dev.deluge-torrent.org/wiki/Plugins#InstallingPluginEggs).
+### linuxserver/deluge Docker (recommended)
 
-After installing the plugin, restarting Deluge and the Deluge daemon (`deluged`) is recommended in order to avoid errors.
+#### 1. docker-compose environment
 
-## Usage
+```yaml
+deluge:
+  image: lscr.io/linuxserver/deluge:latest
+  environment:
+    - DOCKER_MODS=linuxserver/mods:universal-package-install
+    - INSTALL_PIP_PACKAGES=python-telegram-bot>=20.0
+    - PYTHONPATH=/lsiopy/lib/python3.12/site-packages
+  volumes:
+    - ./config/Deluge:/config
+```
 
-After you've installed and enabled the plugin using the Deluge GTK or Web UI, you will need to configure a bot token and Telegram user ID. In order to do so, send a message to [@BotFather](https://telegram.me/BotFather) and create a new bot according to BotFather's instructions. Once you've created your bot, you will be able to generate a token for your newly created bot. Copy it to the plugin's configuration under "Telegram Bot Token". Before you continue, make sure you initiate a conversation with your new bot by sending it the `/start` command.
+- `DOCKER_MODS` enables pip package installation on container start.
+- `INSTALL_PIP_PACKAGES` installs the Telegram bot library.
+- `PYTHONPATH` ensures Deluge can find pip-installed packages at runtime (linuxserver installs them under `/lsiopy/`).
 
-Afterwards, send a message to [@MyIDbot](https://telegram.me/myidbot) and send it the `/getid` command to receive your Telegram user ID. Copy your user ID to Telegramer's configuration under "Telegram User ID".
+#### 2. Download the egg
 
-You may also add additional comma-separated user IDs in the "Additional IDs" field. Any additional users will have the ability to send downloads to Deluge using the `/add` command. All other commands and notifications will only be available to and received by the bot owner (specified in "Telegram User ID").
+Download the latest `.egg` from the [Releases](https://github.com/Avallone-io/deluge-telegramer/releases) page matching your Python version (e.g. `Telegramer-2.2.0.0-py3.12.egg`).
 
-Now, test these settings by clicking the **`Test`** button. You should receive a message from your newly created bot. Hooray!
+#### 3. Extract the egg (CRITICAL)
 
-**Commands:** Send your bot the `/help` command to see what commands are supported.
-* The `/list` command will allow you to see a list of all torrents, whereas the `/down` and `/up` commands will show you only those downloading or uploading.
-* The `/add` command allows you to add a torrent to Deluge, using either a magnet link, a torrent file URL, or an actual torrent file!
-* Contact [@BotFather](https://telegram.me/BotFather) again to give your bot a profile photo, change its name, or add quick-access commands to your bot using `/setcommands`. Adding the `/help` command to your bot's quick-access list an easy way to receive clickable links to all other commands.
+**Deluge 2.2.0 only loads extracted `.egg` directories, not zip files.** You must unzip the egg into the plugins folder:
 
-**Categories:** You may also notice the *Category* fields in the Telegramer configuration panel. This is an optional feature which allows you to set pairs of Categories and matching Directories to which you would like to move torrent contents upon completion. For example, if you set `Category 1` to `Music` and `Directory 1` to `C:\Music` or `/home/user/Music`, your bot will prompt you to save in the `Music` category when you use the `/add` command to add a new torrent. Now the torrent you download will be moved to the appropriate directory when finished! Make sure the directories you set in the category configuration really exist, or else the categories won't show up as options when adding a new torrent.
-Alternatively, you may also enter a new or different directory to which you'd like to save files once they're finished downloading. Simply send your bot the directory path in quotes (e.g. `"/home/user/NewDirectory/"`).
+```bash
+cd ./config/Deluge/plugins/
+unzip Telegramer-2.2.0.0-py3.12.egg -d Telegramer-2.2.0.0-py3.12.egg.tmp
+rm Telegramer-2.2.0.0-py3.12.egg
+mv Telegramer-2.2.0.0-py3.12.egg.tmp Telegramer-2.2.0.0-py3.12.egg
+```
 
-**Labels:**
-In addition to *Categories*, you can use the built-in *Label* plugin to label torrents using existing labels or by creating a new label.
+The result should be a **directory** named `Telegramer-2.2.0.0-py3.12.egg/` containing `EGG-INFO/` and `telegramer/`.
 
-**Proxy:**
-The Telegram bot can also direct all traffic through a proxy. Proxy addresses should use the format: `protocol://PROXY_HOST:PROXY_PORT`, e.g. `socks5://127.0.0.1:9051`. Proxy settings may also accept optional authentication (username and password).
+#### 4. Restart the container
 
-**RSS:**
-If you use the [YaRSS2](https://dev.deluge-torrent.org/wiki/Plugins/YaRSS2) plugin, you can add new search keywords to any of your existing RSS feeds, using predefined regular expression templates. Simply send `/rss`, pick one of your predefined RSS feeds, then pick one of your predefined regular expression templates, and send your bot the keyword you'd like YaRSS2 to grab (for an example, see the [screenshots](#screenshots) below).
+```bash
+docker compose restart deluge
+```
 
-## Development
+#### 5. Enable in Web UI
 
-Want to contribute? Great!
+Go to **Preferences → Plugins** and enable **Telegramer**.
 
-If you have any suggestions for improvement or new features you think might help others, posting *Issues* and *Pull Requests* are always welcome.
+### Manual install (non-Docker)
 
-If you just want to show your support for the project, star it!
+1. Build the egg: `python setup.py bdist_egg`
+2. Copy the egg to `~/.config/deluge/plugins/`
+3. **Extract it** (same unzip procedure as above)
+4. Restart `deluged` and enable in the UI
 
-**Issues** can be reported on the GitHub [issue tracker](http://github.com/noam09/deluge-telegramer/issues),
-just make sure to post the issue with a clear title, description and a log snippet if you know how. Remember to close your issue once it's solved, and if you found the solution yourself, please comment so that others benefit from it.
+## Bot Setup
 
-**Feature requests** can also be posted on the GitHub [issue tracker](http://github.com/noam09/deluge-telegramer/issues).
+1. **Create a bot**: Message [@BotFather](https://telegram.me/BotFather) on Telegram and follow instructions to create a new bot. Copy the **token**.
 
-**Support** the project by implementing new features, solving support tickets and providing bug fixes.
+2. **Get your user ID**: Message [@MyIDBot](https://telegram.me/myidbot) and send `/getid`. Copy your **user ID**.
+
+3. **Configure the plugin**: In Deluge Web UI → Preferences → Telegramer:
+   - Paste your bot token into "Telegram Bot Token"
+   - Paste your user ID into "Telegram User ID"
+   - Optionally add comma-separated additional user IDs (they can use `/add` but won't get notifications)
+
+4. **Start conversation**: Send `/start` to your bot on Telegram.
+
+5. **Test**: Click the **Test** button in Telegramer preferences. You should receive a message from your bot.
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `/help` | Show available commands |
+| `/list` | List all torrents |
+| `/down` | List downloading torrents |
+| `/up` | List uploading/seeding torrents |
+| `/add` | Add a torrent (magnet, URL, or .torrent file) |
+| `/cancel` | Cancel current operation |
+| `/rss` | Add RSS filter (requires YaRSS2 plugin) |
+
+**Categories**: Configure category/directory pairs in Telegramer preferences. When adding a torrent, the bot will prompt you to pick a category and move the completed download to the matching directory.
+
+**Labels**: Works with Deluge's built-in Label plugin to tag torrents.
+
+**Proxy**: Configure proxy in format `protocol://HOST:PORT` (e.g. `socks5://127.0.0.1:9051`).
+
+## Troubleshooting
+
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common issues and debugging commands.
 
 ## Screenshots
 
@@ -100,63 +134,49 @@ Initiating communication with the new bot:
 
 ![preview thumb](http://i.imgur.com/h7TaMtz.jpg)
 
-Typing a slash ("/") brings up the quick-access commands. These can be set by contacting [@BotFather](https://telegram.me/BotFather) and sending `/setcommands`.
+Quick-access commands (set via [@BotFather](https://telegram.me/BotFather) `/setcommands`):
 
 ![preview thumb](http://i.imgur.com/HoM9j6O.jpg)
 
-When adding a new torrent, you will first be prompted to pick a category:
+Category selection when adding a torrent:
 
 ![preview thumb](http://i.imgur.com/VaBVlYs.jpg)
 
-Afterwards you may pick an existing label, or create a new one:
+Label selection:
 
 ![preview thumb](http://i.imgur.com/Obs3DZj.jpg)
 
-Then just pick a type:
-
-![preview thumb](http://i.imgur.com/gBYLQ5j.jpg)
-
-You can add a new torrent URL:
+Adding by URL:
 
 ![preview thumb](http://i.imgur.com/LYPDy3y.jpg)
 
-Or you can send a .torrent file:
+Adding a .torrent file:
 
 ![preview thumb](http://i.imgur.com/jdGO6TI.jpg)
 
-Or add a new magnet link:
+Adding a magnet link:
 
 ![preview thumb](http://i.imgur.com/BiOh7lw.jpg)
 
-You can always list the torrents Deluge is currently downloading:
+Listing downloads:
 
 ![preview thumb](http://i.imgur.com/S7Zf2fN.jpg)
 
-Once the download is complete, you may choose to receive a Telegram notification. You can then check the status of torrents you are seeding:
+Seeding status:
 
 ![preview thumb](http://i.imgur.com/CRdBwJa.jpg)
 
-You can also add new filters to YaRSS2 to make automatic downloading of torrents from RSS feeds much easier.
-Telegramer example configuration:
+RSS filter configuration:
 
 ![preview thumb](https://i.imgur.com/dMBgWuC.png?2)
 
-YaRSS2 example configuration:
+YaRSS2 configuration:
 
 ![preview thumb](https://i.imgur.com/K3vwVs7.png?2)
 
-Adding a new RSS download filter via chat:
+Adding RSS filter via chat:
 
 ![preview thumb](https://i.imgur.com/BZDZC6W.jpg?2)
-
-Filter added:
-
-![preview thumb](https://i.imgur.com/4E8P0VD.png?2)
-
-
-## Known Issues
-
-* Currently none, please post any issues you find on the [issue tracker](http://github.com/noam09/deluge-telegramer/issues).
 
 ## License
 
