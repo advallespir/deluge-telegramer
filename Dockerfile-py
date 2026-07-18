@@ -1,14 +1,14 @@
-ARG  PYTHON_VERSION=3.11
+ARG  PYTHON_VERSION=3.12
 FROM python:${PYTHON_VERSION}-alpine AS base
 
 RUN mkdir -p /usr/src/app
 RUN mkdir -p /output
 WORKDIR /usr/src/app
 
-RUN pip install --no-cache-dir setuptools
+RUN pip install --no-cache-dir setuptools build
 
 COPY telegramer /usr/src/app/telegramer
 COPY setup.py /usr/src/app/setup.py
 COPY LICENSE /usr/src/app/LICENSE
 
-RUN python setup.py bdist_egg
+RUN python setup.py bdist_egg && python -m build

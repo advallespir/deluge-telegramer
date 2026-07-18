@@ -48,17 +48,7 @@ import logging
 import traceback
 from time import strftime
 import time
-# from deluge.log import LOG as log
-import logging
 log = logging.getLogger(__name__)
-
-# import sys
-# reload(sys)
-# sys.setdefaultencoding('utf8')
-
-#############################
-# log.setLevel(logging.DEBUG)
-#############################
 
 
 def prelog():
@@ -67,12 +57,13 @@ def prelog():
 
 try:
     import re
+    import asyncio
+    import threading
     import urllib.request, urllib.error, urllib.parse
     from telegram import (ReplyKeyboardMarkup, ReplyKeyboardRemove, Bot, Update)
-    from telegram.ext import (Updater, CallbackContext, CommandHandler, MessageHandler,
-                              ConversationHandler, Filters)
-    from telegram.utils.request import Request
-    import threading
+    from telegram.ext import (Application, ApplicationBuilder, ContextTypes,
+                              CommandHandler, MessageHandler,
+                              ConversationHandler, filters)
     from base64 import b64encode
     from time import strftime, sleep
     from string import ascii_letters
@@ -88,11 +79,6 @@ try:
     from twisted.internet import defer
 except ImportError as e:
     log.error(prelog() + 'Import error - %s\n%s' % (str(e), traceback.format_exc()))
-
-
-# class _FilterMagnets(BaseFilter):
-#     def filter(self, message):
-#         return 'magnet:?' in message.text
 
 
 CATEGORY, SET_LABEL, TORRENT_TYPE, ADD_MAGNET, ADD_TORRENT, ADD_URL, RSS_FEED, FILE_NAME, REGEX = list(range(9))
@@ -186,8 +172,6 @@ INFO_DICT = (('queue', lambda i, s: i != -1 and str(i) or '#'),
 
 INFOS = [i[0] for i in INFO_DICT]
 
-# filter_magnets = _FilterMagnets()
-
 
 def is_int(s):
     try:
@@ -204,7 +188,6 @@ def format_torrent_info(torrent):
     status_string = ''
     try:
         status_string = ''.join([f(status[i], status) for i, f in INFO_DICT if f is not None])
-    # except UnicodeDecodeError as e:
     except Exception as e:
         status_string = ''
         log.error(prelog() + str(e) + '\n' + traceback.format_exc())
@@ -215,7 +198,9 @@ class Core(CorePluginBase):
     def __init__(self, *args):
         self.opts = {}
         self.bot = None
-        self.updater = None
+        self.application = None
+        self.loop = None
+        self._loop_thread = None
         self.is_rss = False
         self.yarss_data = YarssData()
         self.yarss_config = None
@@ -243,12 +228,10 @@ class Core(CorePluginBase):
                              'seeding':     self.cmd_up,
                              'paused':      self.cmd_paused,
                              'queued':      self.cmd_paused,
-                             # '?':           self.cmd_help,
                              'cancel':      self.cancel,
                              'help':        self.cmd_help,
                              'start':       self.cmd_help,
-                             'reload':      self.restart_telegramer,
-                             # 'rss':         self.cmd_add_rss,
+                             'reload':      self._cmd_reload,
                              'commands':    self.cmd_help}
 
             self.torrent_manager = component.get("TorrentManager")
@@ -262,14 +245,12 @@ class Core(CorePluginBase):
                     if self.config['telegram_users']:
                         telegram_user_list = [_f for _f in [x.strip() for x in
                                                     str(self.config['telegram_users']).split(',')] if _f]
-                        # Merge with whitelist and remove duplicates - order will be lost
                         self.whitelist = list(set(self.whitelist + telegram_user_list))
                         log.debug(prelog() + 'Whitelist: ' + str(self.whitelist))
                     if self.config['telegram_users_notify']:
                         n = [_f for _f in [x.strip() for x in
                                    str(self.config['telegram_users_notify']).split(',')] if _f]
                         telegram_user_list_notify = [a for a in n if is_int(a)]
-                        # Merge with notifylist and remove duplicates - order will be lost
                         self.notifylist = list(set(self.notifylist +
                                                    telegram_user_list_notify))
                         log.debug(prelog() + 'Notify: ' + str(self.notifylist))
@@ -282,31 +263,31 @@ class Core(CorePluginBase):
                         self.check_speed_timer.start(int(self.config['user_timer']), now=False)
                     except Exception as e:
                         log.error(prelog() + str(e) + '\n' + traceback.format_exc())
-                # Proxy args
-                REQUEST_KWARGS = {
-                    'proxy_url': self.config['proxy_url'],
-                    'urllib3_proxy_kwargs': {
-                        'username': self.config['urllib3_proxy_kwargs_username'],
-                        'password': self.config['urllib3_proxy_kwargs_password'],
-                    }
-                }
-                bot_request = Request(**REQUEST_KWARGS)
-                self.bot = Bot(self.config['telegram_token'], request=bot_request)
-                # Create the EventHandler and pass it bot's token.
-                # self.updater = Updater(self.config['telegram_token'], bot=self.bot, request_kwargs=REQUEST_KWARGS)
-                self.updater = Updater(bot=self.bot, use_context=True, request_kwargs=REQUEST_KWARGS)
-                # Get the dispatcher to register handlers
-                dp = self.updater.dispatcher
+
+                # Create dedicated asyncio event loop in a daemon thread
+                self.loop = asyncio.new_event_loop()
+                self._loop_thread = threading.Thread(
+                    target=self.loop.run_forever, daemon=True)
+                self._loop_thread.start()
+
+                # Build Application with optional proxy
+                builder = ApplicationBuilder().token(self.config['telegram_token'])
+                if self.config['proxy_url']:
+                    builder = builder.proxy(self.config['proxy_url'])
+                    builder = builder.get_updates_proxy(self.config['proxy_url'])
+                self.application = builder.build()
+                self.bot = self.application.bot
+
                 # Add conversation handler with the different states
                 conv_handler = ConversationHandler(
                     entry_points=[CommandHandler('add', self.add)],
                     states={
-                        CATEGORY: [MessageHandler(Filters.text, self.category)],
-                        SET_LABEL: [MessageHandler(Filters.text, self.set_label)],
-                        TORRENT_TYPE: [MessageHandler(Filters.text, self.torrent_type)],
-                        ADD_MAGNET: [MessageHandler(Filters.text, self.add_magnet)],
-                        ADD_TORRENT: [MessageHandler(Filters.document, self.add_torrent)],
-                        ADD_URL: [MessageHandler(Filters.text, self.add_url)]
+                        CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.category)],
+                        SET_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_label)],
+                        TORRENT_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.torrent_type)],
+                        ADD_MAGNET: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_magnet)],
+                        ADD_TORRENT: [MessageHandler(filters.Document.ALL, self.add_torrent)],
+                        ADD_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_url)]
                     },
                     fallbacks=[CommandHandler('cancel', self.cancel)]
                 )
@@ -314,55 +295,51 @@ class Core(CorePluginBase):
                 conv_handler_paused = ConversationHandler(
                     entry_points=[CommandHandler('addpaused', self.add_paused)],
                     states={
-                        CATEGORY: [MessageHandler(Filters.text, self.category)],
-                        SET_LABEL: [MessageHandler(Filters.text, self.set_label)],
-                        TORRENT_TYPE: [MessageHandler(Filters.text, self.torrent_type)],
-                        ADD_MAGNET: [MessageHandler(Filters.text, self.add_magnet)],
-                        ADD_TORRENT: [MessageHandler(Filters.document, self.add_torrent)],
-                        ADD_URL: [MessageHandler(Filters.text, self.add_url)]
+                        CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.category)],
+                        SET_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_label)],
+                        TORRENT_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.torrent_type)],
+                        ADD_MAGNET: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_magnet)],
+                        ADD_TORRENT: [MessageHandler(filters.Document.ALL, self.add_torrent)],
+                        ADD_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_url)]
                     },
                     fallbacks=[CommandHandler('cancel', self.cancel)]
                 )
                 conv_handler_rss = ConversationHandler(
                     entry_points=[CommandHandler('rss', self.cmd_add_rss)],
                     states={
-                        RSS_FEED: [MessageHandler(Filters.text, self.rss_feed)],
-                        REGEX: [MessageHandler(Filters.text, self.regex)],
-                        FILE_NAME: [MessageHandler(Filters.text, self.rss_file_name)],
-                        CATEGORY: [MessageHandler(Filters.text, self.category)]
+                        RSS_FEED: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.rss_feed)],
+                        REGEX: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.regex)],
+                        FILE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.rss_file_name)],
+                        CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.category)]
                     },
                     fallbacks=[CommandHandler('cancel', self.cancel)]
                 )
 
-                dp.add_handler(conv_handler)
-                dp.add_handler(conv_handler_paused)
-                dp.add_handler(conv_handler_rss)
-                dp.add_handler(MessageHandler(Filters.document, self.add_torrent))
-                dp.add_handler(MessageHandler(Filters.regex(r'magnet:\?'), self.find_magnet))
+                self.application.add_handler(conv_handler)
+                self.application.add_handler(conv_handler_paused)
+                self.application.add_handler(conv_handler_rss)
+                self.application.add_handler(MessageHandler(filters.Document.ALL, self.add_torrent))
+                self.application.add_handler(MessageHandler(filters.Regex(r'magnet:\?'), self.find_magnet))
 
                 for key, value in self.COMMANDS.items():
-                    dp.add_handler(CommandHandler(key, value))
+                    self.application.add_handler(CommandHandler(key, value))
 
                 # Log all errors
-                dp.add_error_handler(self.error)
-                #######################################################################
-                """
-                log.error(prelog() + 'Start thread for polling')
-                # Initialize polling thread
-                bot_thread = threading.Thread(target=self.telegram_poll_start, args=())
-                # Daemonize thread
-                bot_thread.daemon = True
-                # Start thread
-                bot_thread.start()
-                """
-                #######################################################################
-                # Start the Bot
-                self.updater.start_polling(poll_interval=0.05)
-                # self.updater.idle() # blocks
+                self.application.add_error_handler(self.error)
+
+                # Start the bot on the asyncio loop
+                async def _start_bot():
+                    await self.application.initialize()
+                    await self.application.start()
+                    await self.application.updater.start_polling(poll_interval=0.05)
+
+                future = asyncio.run_coroutine_threadsafe(_start_bot(), self.loop)
+                future.result(timeout=30)  # Block until bot is started
+
         except Exception as e:
             log.error(prelog() + str(e) + '\n' + traceback.format_exc())
 
-    def error(self, update: Update, context: CallbackContext):
+    async def error(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.warn('Update "%s" caused error "%s"' % (update, context.error))
 
     def disable(self):
@@ -372,15 +349,38 @@ class Core(CorePluginBase):
             log.info(prelog() + 'Disable')
             reactor.callLater(2, self.disconnect_events)
             self.whitelist = []
-            self.telegram_poll_stop()
-            # self.bot = None
+
+            # Stop the application on the asyncio loop
+            if self.application and self.loop and self.loop.is_running():
+                async def _stop_bot():
+                    if self.application.updater and self.application.updater.running:
+                        await self.application.updater.stop()
+                    await self.application.stop()
+                    await self.application.shutdown()
+
+                future = asyncio.run_coroutine_threadsafe(_stop_bot(), self.loop)
+                try:
+                    future.result(timeout=10)
+                except Exception as e:
+                    log.error(prelog() + 'Error stopping bot: %s' % str(e))
+
+            # Stop the asyncio loop and join the thread
+            if self.loop and self.loop.is_running():
+                self.loop.call_soon_threadsafe(self.loop.stop)
+            if self._loop_thread and self._loop_thread.is_alive():
+                self._loop_thread.join(timeout=5)
+
+            self.application = None
+            self.bot = None
+            self.loop = None
+            self._loop_thread = None
         except Exception as e:
             log.error(prelog() + str(e) + '\n' + traceback.format_exc())
 
     def update(self):
         pass
 
-    def telegram_send(self, message, to=None, parse_mode=None):
+    async def telegram_send(self, message, to=None, parse_mode=None):
         if self.bot:
             log.debug(prelog() + 'Send message')
             if not to:
@@ -403,64 +403,45 @@ class Core(CorePluginBase):
                         for line in message.split('\n'):
                             tmp += line + '\n'
                             if len(tmp) > 4000:
-                                msg = self.bot.send_message(usr, tmp,
-                                                            parse_mode='Markdown')
+                                await self.bot.send_message(
+                                    usr, tmp, parse_mode='Markdown')
                                 tmp = ''
+                        if tmp:
+                            await self.bot.send_message(
+                                usr, tmp, parse_mode='Markdown')
                     else:
                         if parse_mode:
-                            msg = self.bot.send_message(usr, message,
-                                                        parse_mode='Markdown')
+                            await self.bot.send_message(
+                                usr, message, parse_mode='Markdown')
                         else:
-                            msg = self.bot.send_message(usr, message)
+                            await self.bot.send_message(usr, message)
         log.debug(prelog() + 'return')
         return
 
-    def telegram_poll_start(self):
-        # Skip this - for testing only
-        pass
-        """Like non_stop, this will run forever
-        this way suspend/sleep won't kill the thread"""
-
-        """
-        while True:
+    def _telegram_send_from_twisted(self, message, to=None, parse_mode=None):
+        """Sync wrapper for telegram_send() to be called from Twisted callbacks."""
+        if self.loop and self.loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(
+                self.telegram_send(message, to=to, parse_mode=parse_mode),
+                self.loop
+            )
             try:
-                if self.updater:
-                    log.debug(prelog() + 'Start polling')
-                    # self.bot.polling()
-                    self.updater.start_polling(poll_interval=0.05)
-                    # self.updater.idle()
-                    while True:     # and bot running HTTPSConnectionPool
-                        sleep(10)
+                future.result(timeout=30)
             except Exception as e:
-                if self.updater:
-                    self.updater.stop()
-                log.error(prelog() + str(e) + '\n' +
-                          traceback.format_exc() + ' - Sleeping...')
-                sleep(10)
-        """
+                log.error(prelog() + 'Error sending from Twisted: %s' % str(e))
 
-    def telegram_poll_stop(self):
-        try:
-            log.debug(prelog() + 'Stop polling')
-            # if self.updater.dispatcher:
-            #     self.updater.dispatcher.stop()
-            if self.updater:
-                self.updater.stop()
-        except Exception as e:
-            log.error(prelog() + str(e) + '\n' + traceback.format_exc())
-
-    def cancel(self, update: Update, context: CallbackContext):
+    async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
             log.info("User %s canceled the conversation."
                      % str(update.message.chat.id))
-            update.message.reply_text('Operation cancelled',
-                                      reply_markup=ReplyKeyboardRemove())
+            await update.message.reply_text('Operation cancelled',
+                                            reply_markup=ReplyKeyboardRemove())
             self.is_rss = False
             self.magnet_only = False
             self.yarss_data.clear()
             return ConversationHandler.END
 
-    def cmd_help(self, update: Update, context: CallbackContext):
+    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.debug(prelog() + "Entered cmd_help")
         if str(update.message.chat.id) in self.whitelist:
             log.debug(prelog() + str(update.message.chat.id) + " in whitelist")
@@ -475,104 +456,82 @@ class Core(CorePluginBase):
                         '/help - Show this help message']
             log.debug(prelog() + "telegram_send to " +
                       str([update.message.chat.id]))
-            self.telegram_send('\n'.join(help_msg),
-                               to=[update.message.chat.id],
-                               parse_mode='Markdown')
+            await self.telegram_send('\n'.join(help_msg),
+                                     to=[update.message.chat.id],
+                                     parse_mode='Markdown')
 
-    def cmd_list(self, update: Update, context: CallbackContext):
+    async def cmd_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
-            # log.error(self.list_torrents())
-            self.telegram_send(self.list_torrents(lambda t:
+            await self.telegram_send(self.list_torrents(lambda t:
                                t.get_status(('state',))['state'] in
                                ('Active', 'Downloading', 'Seeding',
                                 'Paused', 'Checking', 'Error', 'Queued')),
                                to=[update.message.chat.id],
                                parse_mode='Markdown')
 
-    def cmd_down(self, update: Update, context: CallbackContext):
+    async def cmd_down(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
-            self.telegram_send(self.list_torrents(lambda t:
+            await self.telegram_send(self.list_torrents(lambda t:
                                t.get_status(('state',))['state'] == 'Downloading'),
                                to=[update.message.chat.id],
                                parse_mode='Markdown')
 
-    def cmd_up(self, update: Update, context: CallbackContext):
+    async def cmd_up(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
-            self.telegram_send(self.list_torrents(lambda t:
+            await self.telegram_send(self.list_torrents(lambda t:
                                t.get_status(('state',))['state'] == 'Seeding'),
                                to=[update.message.chat.id],
                                parse_mode='Markdown')
 
-    def cmd_paused(self, update: Update, context: CallbackContext):
+    async def cmd_paused(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
-            self.telegram_send(self.list_torrents(lambda t:
+            await self.telegram_send(self.list_torrents(lambda t:
                                t.get_status(('state',))['state'] in
                                ('Paused', 'Queued')),
                                to=[update.message.chat.id],
                                parse_mode='Markdown')
 
-    def add(self, update: Update, context: CallbackContext):
+    async def add(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
             self.opts = {}
             self.is_rss = False
             self.magnet_only = False
-            return self.prepare_categories(update, context)
-            """
-            if "YaRSS2" in component.get('Core').get_available_plugins():
-                return self.prepare_torrent_or_rss(update, context)
-            else:
-                return self.prepare_categories(update, context)
-            """
+            return await self.prepare_categories(update, context)
 
-    def add_paused(self, update: Update, context: CallbackContext):
-        # log.error(type(update.message.chat.id) + str(update.message.chat.id))
+    async def add_paused(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
             self.opts = {}
             self.opts["addpaused"] = True
             self.is_rss = False
             self.magnet_only = False
-            return self.prepare_categories(update, context)
+            return await self.prepare_categories(update, context)
 
-    def cmd_add_rss(self, update: Update, context: CallbackContext):
-        # log.error(type(update.message.chat.id) + str(update.message.chat.id))
+    async def cmd_add_rss(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
             if "YaRSS2" in component.get('Core').get_available_plugins():
-                return self.add_rss(update, context)
+                return await self.add_rss(update, context)
             else:
-                update.message.reply_text('YaRSS2 plugin not available',
-                                          reply_markup=ReplyKeyboardRemove())
+                await update.message.reply_text('YaRSS2 plugin not available',
+                                                reply_markup=ReplyKeyboardRemove())
                 self.is_rss = False
                 self.yarss_data.clear()
                 return ConversationHandler.END
-                # return self.prepare_categories(update, context)
 
-    # def prepare_torrent_or_rss(self, update: Update, context: CallbackContext):
-    #     try:
-    #         keyboard_options = [[STRINGS['torrent']], [STRINGS['rss']]]
-    #         update.message.reply_text(
-    #             '%s\n%s' % (STRINGS['torrent_or_rss'], STRINGS['cancel']),
-    #             reply_markup=ReplyKeyboardMarkup(keyboard_options,
-    #                                              one_time_keyboard=True))
-    #         return TORRENT_OR_RSS
-    #
-    #     except Exception as e:
-    #         log.error(prelog() + str(e) + '\n' + traceback.format_exc())
-
-    def torrent_or_rss(self, update: Update, context: CallbackContext):
+    async def torrent_or_rss(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             if str(update.message.chat.id) not in self.whitelist:
                 return
 
             if STRINGS['torrent'] == update.message.text:
-                return self.prepare_categories(update, context)
+                return await self.prepare_categories(update, context)
 
             if STRINGS['rss'] == update.message.text:
-                return self.add_rss(update, context)
+                return await self.add_rss(update, context)
 
         except Exception as e:
             log.error(prelog() + str(e) + '\n' + traceback.format_exc())
 
-    def prepare_categories(self, update: Update, context: CallbackContext):
+    async def prepare_categories(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             keyboard_options = []
             filtered_dict = {c: d for c, d in self.config["categories"].items() if os.path.isdir(d)}
@@ -585,7 +544,7 @@ class Core(CorePluginBase):
                 keyboard_options.append([c])
 
             keyboard_options.append([STRINGS['no_category']])
-            update.message.reply_text(
+            await update.message.reply_text(
                 '%s\n%s' % (STRINGS['which_cat'], STRINGS['cancel']),
                 reply_markup=ReplyKeyboardMarkup(keyboard_options,
                                                  one_time_keyboard=True))
@@ -593,16 +552,15 @@ class Core(CorePluginBase):
         except Exception as e:
             log.error(prelog() + str(e) + '\n' + traceback.format_exc())
 
-    def prepare_torrent_type(self, update: Update, context: CallbackContext):
+    async def prepare_torrent_type(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
             try:
-                # Request torrent type
                 keyboard_options = []
                 keyboard_options.append(['Magnet'])
                 keyboard_options.append(['.torrent'])
                 keyboard_options.append(['URL'])
 
-                update.message.reply_text(
+                await update.message.reply_text(
                     STRINGS['what_kind'],
                     reply_markup=ReplyKeyboardMarkup(keyboard_options,
                                                      one_time_keyboard=True))
@@ -610,20 +568,16 @@ class Core(CorePluginBase):
             except Exception as e:
                 log.error(prelog() + str(e) + '\n' + traceback.format_exc())
 
-    def category(self, update: Update, context: CallbackContext):
+    async def category(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
             try:
                 if STRINGS['no_category'] == update.message.text:
                     self.opts = self.opts
                 else:
                     if update.message.text in list(self.config["categories"].keys()):
-                        # move_completed_path vs download_location
                         self.opts["move_completed_path"] = self.config["categories"][update.message.text]
                         self.opts["move_completed"] = True
-
-                    # If none of the existing categories were selected,
-                    # maybe user is trying to save to a new directory
-                    else:  # if not self.opts:
+                    else:
                         try:
                             log.debug(prelog() + 'Custom directory entered: ' +
                                       str(update.message.text))
@@ -644,7 +598,7 @@ class Core(CorePluginBase):
                                       traceback.format_exc())
                 if self.is_rss:
                     log.debug(prelog() + "is_rss, calling RSS_APPLY")
-                    return self.rss_apply(update, context)
+                    return await self.rss_apply(update, context)
 
                 log.debug(prelog() + "Label segment")
                 keyboard_options = []
@@ -653,7 +607,6 @@ class Core(CorePluginBase):
                     component.get('Core').enable_plugin('Label')
                     label_plugin = component.get('CorePlugin.Label')
                     if label_plugin:
-                        # Create label if neccessary
                         for g in label_plugin.get_labels():
                             keyboard_options.append([g])
                 except Exception as e:
@@ -661,62 +614,43 @@ class Core(CorePluginBase):
                     log.error(prelog() + str(e) + '\n' + traceback.format_exc())
 
                 keyboard_options.append([STRINGS['no_label']])
-                update.message.reply_text(
+                await update.message.reply_text(
                     STRINGS['which_label'],
                     reply_markup=ReplyKeyboardMarkup(keyboard_options,
                                                      one_time_keyboard=True))
 
                 return SET_LABEL
 
-                """
-                if len(keyboard_options) > 0:
-                    keyboard_options.append([STRINGS['no_label']])
-
-                    update.message.reply_text(
-                        STRINGS['which_label'],
-                        reply_markup=ReplyKeyboardMarkup(keyboard_options,
-                                                         one_time_keyboard=True))
-                    return SET_LABEL
-                else:
-                    if self.is_rss:
-                        return self.prepare_rss_feed(update, context)
-                    else:
-                        return self.prepare_torrent_type(update)
-                """
-
             except Exception as e:
                 log.error(prelog() + str(e) + '\n' + traceback.format_exc())
 
-    def prepare_rss_feed(self, update: Update, context: CallbackContext):
+    async def prepare_rss_feed(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if self.yarss_plugin is None:
             self.yarss_plugin = component.get('CorePlugin.YaRSS2')
         if self.yarss_plugin:
             self.yarss_config = self.yarss_plugin.get_config()
             feeds = {}
-            # Create dictionary with feed name:url
             for rss_feed in list(self.yarss_config["rssfeeds"].values()):
                 feeds[rss_feed["name"]] = rss_feed["url"]
-            # If feed(s) found
             count = 0
             if len(feeds) > 0:
                 count = count + 1
                 feedlist = "\n".join(["{}) [{}]({})".format(count, f, feeds[f]) for f in list(feeds.keys())])
                 keyboard_options = [list(feeds.keys())]
-                update.message.reply_text(
+                await update.message.reply_text(
                     '%s\n\n%s\n\n%s' % (STRINGS['which_rss_feed'], feedlist, STRINGS['cancel']),
                     reply_markup=ReplyKeyboardMarkup(keyboard_options, one_time_keyboard=True),
                     parse_mode='Markdown')
                 return RSS_FEED
-            # If no feed(s) found
             else:
                 log.debug(prelog() + STRINGS['no_rss_found'])
-                update.message.reply_text('%s' % (STRINGS['no_rss_found']),
-                                          reply_markup=ReplyKeyboardRemove())
+                await update.message.reply_text('%s' % (STRINGS['no_rss_found']),
+                                                reply_markup=ReplyKeyboardRemove())
                 return ConversationHandler.END
 
         return ConversationHandler.END
 
-    def rss_feed(self, update: Update, context: CallbackContext):
+    async def rss_feed(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not str(update.message.chat.id) in self.whitelist:
             return
         self.is_rss = True
@@ -732,37 +666,37 @@ class Core(CorePluginBase):
             keyboard_options = [[regex_name] for regex_name in list(self.config["regex_exp"].keys()) if regex_name != '']
 
             if len(keyboard_options) > 0:
-                update.message.reply_text(
+                await update.message.reply_text(
                     '%s\n%s' % (STRINGS['which_regex'], STRINGS['cancel']),
                     reply_markup=ReplyKeyboardMarkup(keyboard_options, one_time_keyboard=True))
                 return REGEX
             else:
-                update.message.reply_text(
+                await update.message.reply_text(
                     '%s\n%s' % (STRINGS['no_regex'], STRINGS['cancel']),
                     reply_markup=ReplyKeyboardRemove())
                 return ConversationHandler.END
         except Exception as e:
             log.error(prelog() + str(e) + '\n' + traceback.format_exc())
 
-    def regex(self, update: Update, context: CallbackContext):
+    async def regex(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not str(update.message.chat.id) in self.whitelist:
             return
         if REGEX_SUBS_WORD in self.config["regex_exp"][update.message.text]:
             self.yarss_data.subscription_data["regex_include"] = self.config["regex_exp"][update.message.text]
 
             log.debug(prelog() + 'User chose regex ' + update.message.text)
-            update.message.reply_text(
+            await update.message.reply_text(
                 '%s\n%s' % (STRINGS['file_name'], STRINGS['cancel']),
                 reply_markup=ReplyKeyboardRemove())
             return FILE_NAME
         else:
             keyboard_options = [[regex_name] for regex_name in list(self.config["regex_exp"].keys())]
-            update.message.reply_text(
+            await update.message.reply_text(
                 '%s\n%s' % (STRINGS['no_name'], STRINGS['cancel']),
                 reply_markup=ReplyKeyboardMarkup(keyboard_options, one_time_keyboard=True))
             return REGEX
 
-    def rss_file_name(self, update: Update, context: CallbackContext):
+    async def rss_file_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not str(update.message.chat.id) in self.whitelist:
             return
 
@@ -778,9 +712,9 @@ class Core(CorePluginBase):
         self.yarss_data.subscription_data["label"] = self.label
         self.yarss_data.subscription_data["name"] = update.message.text
 
-        return self.prepare_categories(update, context)
+        return await self.prepare_categories(update, context)
 
-    def rss_apply(self, update: Update, context: CallbackContext):
+    async def rss_apply(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.debug(prelog() + "entered rss_apply")
         if str(update.message.chat.id) in self.whitelist:
             log.debug(prelog() + "in whitelist")
@@ -791,68 +725,58 @@ class Core(CorePluginBase):
                     self.yarss_data.subscription_data["download_location"] = self.opts["move_completed_path"]
                 r = self.yarss_data.addRss()
                 if r:
-                    update.message.reply_text('%s' % (STRINGS['added_rss']),
-                                              reply_markup=ReplyKeyboardRemove())
+                    await update.message.reply_text('%s' % (STRINGS['added_rss']),
+                                                    reply_markup=ReplyKeyboardRemove())
                 return ConversationHandler.END
             except Exception as e:
                 log.error(prelog() + str(e) + '\n' + traceback.format_exc())
         else:
             log.debug(prelog() + "not in whitelist")
 
-    def set_label(self, update: Update, context: CallbackContext):
+    async def set_label(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
             try:
-                # user = update.message.chat.id
                 self.label = update.message.text
                 log.debug(prelog() + "Label: %s" % (update.message.text))
 
-                return self.prepare_torrent_type(update, context)
-
-                """
-                # Request torrent type
-                if self.is_rss:
-                    return self.prepare_rss_feed(update, context)
-                else:
-                    return self.prepare_torrent_type(update)
-                """
+                return await self.prepare_torrent_type(update, context)
 
             except Exception as e:
                 log.error(prelog() + str(e) + '\n' + traceback.format_exc())
 
-    def torrent_type(self, update: Update, context: CallbackContext):
+    async def torrent_type(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
             try:
                 user = update.message.chat.id
                 torrent_type_selected = update.message.text
 
                 if torrent_type_selected == 'Magnet':
-                    update.message.reply_text(STRINGS['send_magnet'],
-                                              reply_markup=ReplyKeyboardRemove())
+                    await update.message.reply_text(STRINGS['send_magnet'],
+                                                    reply_markup=ReplyKeyboardRemove())
                     return ADD_MAGNET
 
                 elif torrent_type_selected == '.torrent':
-                    update.message.reply_text(STRINGS['send_file'],
-                                              reply_markup=ReplyKeyboardRemove())
+                    await update.message.reply_text(STRINGS['send_file'],
+                                                    reply_markup=ReplyKeyboardRemove())
                     return ADD_TORRENT
 
                 elif torrent_type_selected == 'URL':
-                    update.message.reply_text(STRINGS['send_url'],
-                                              reply_markup=ReplyKeyboardRemove())
+                    await update.message.reply_text(STRINGS['send_url'],
+                                                    reply_markup=ReplyKeyboardRemove())
                     return ADD_URL
 
                 else:
-                    update.message.reply_text(STRINGS['error'],
-                                              reply_markup=ReplyKeyboardRemove())
+                    await update.message.reply_text(STRINGS['error'],
+                                                    reply_markup=ReplyKeyboardRemove())
                 return ConversationHandler.END
 
             except Exception as e:
                 log.error(prelog() + str(e) + '\n' + traceback.format_exc())
 
-    def add_magnet(self, update: Update, context: CallbackContext):
+    async def add_magnet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
             try:
                 if self.magnet_only:
-                    # Reset bool
                     self.magnet_only = False
                     m = re.findall(r'magnet:\?.*\b', update.message.text)
                     if len(m) == 1:
@@ -869,13 +793,7 @@ class Core(CorePluginBase):
                 else:
                     user = update.message.chat.id
                     log.debug("addmagnet of %s: %s" % (str(user), update.message.text))
-                    # options = None
                     metainfo = update.message.text
-                    """Adds a torrent with the given options.
-                    metainfo could either be base64 torrent
-                    data or a magnet link. Available options
-                    are listed in deluge.core.torrent.TorrentOptions.
-                    """
                     if self.opts is None:
                         self.opts = {}
                     if is_magnet(metainfo):
@@ -885,30 +803,26 @@ class Core(CorePluginBase):
                         tid = component.get('Core').add_torrent_magnet(metainfo, self.opts)
                         r = self.apply_label(tid)
                     else:
-                        update.message.reply_text(STRINGS['not_magnet'],
-                                                  reply_markup=ReplyKeyboardRemove())
+                        await update.message.reply_text(STRINGS['not_magnet'],
+                                                        reply_markup=ReplyKeyboardRemove())
                 return ConversationHandler.END
             except Exception as e:
                 log.error(prelog() + str(e) + '\n' + traceback.format_exc())
 
-            # except Exception as e:
-            #     log.error(prelog() + str(e) + '\n' + traceback.format_exc())
-
-    def find_magnet(self, update: Update, context: CallbackContext):
+    async def find_magnet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
             try:
                 log.debug("Find magnets in message")
                 try:
-                    # options = None
                     m = re.findall(r'magnet:\?.*\b', update.message.text)
                     if len(m) > 0:
                         mag = m[0]
                         self.magnet_only = True
-                        return self.add_magnet(update, context)
+                        return await self.add_magnet(update, context)
                     else:
                         log.debug("Magnet not found in message")
-                        update.message.reply_text(STRINGS['no_magnet_found'],
-                                                  reply_markup=ReplyKeyboardRemove())
+                        await update.message.reply_text(STRINGS['no_magnet_found'],
+                                                        reply_markup=ReplyKeyboardRemove())
                         return ConversationHandler.END
                 except Exception as e:
                     log.error(prelog() + str(e) + '\n' + traceback.format_exc())
@@ -918,7 +832,7 @@ class Core(CorePluginBase):
             except Exception as e:
                 log.error(prelog() + str(e) + '\n' + traceback.format_exc())
 
-    def add_torrent(self, update: Update, context: CallbackContext):
+    async def add_torrent(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
             try:
                 user = update.message.chat.id
@@ -926,14 +840,13 @@ class Core(CorePluginBase):
                           (str(user), update.message.document))
 
                 if update.message.document.mime_type == 'application/x-bittorrent':
-                    # Get file info
-                    file_info = self.bot.getFile(update.message.document.file_id)
-                    # Download file
-                    request = urllib.request.Request(file_info.file_path, headers=HEADERS)
-                    status_code = urllib.request.urlopen(request).getcode()
-                    if status_code == 200:
-                        file_contents = urllib.request.urlopen(request).read()
-                        # Base64 encode file data
+                    # Get file info - use await for async PTB v20+
+                    file_info = await self.bot.get_file(update.message.document.file_id)
+                    # Download file using executor to avoid blocking the event loop
+                    loop = asyncio.get_event_loop()
+                    file_contents = await loop.run_in_executor(
+                        None, self._download_file, file_info.file_path)
+                    if file_contents:
                         metainfo = b64encode(file_contents)
                         if self.opts is None:
                             self.opts = {}
@@ -942,18 +855,29 @@ class Core(CorePluginBase):
                         tid = component.get('Core').add_torrent_file(None, metainfo, self.opts)
                         r = self.apply_label(tid)
                     else:
-                        update.message.reply_text(STRINGS['download_fail'],
-                                                  reply_markup=ReplyKeyboardRemove())
+                        await update.message.reply_text(STRINGS['download_fail'],
+                                                        reply_markup=ReplyKeyboardRemove())
                 else:
-                    update.message.reply_text(STRINGS['not_file'],
-                                              reply_markup=ReplyKeyboardRemove())
+                    await update.message.reply_text(STRINGS['not_file'],
+                                                    reply_markup=ReplyKeyboardRemove())
 
                 return ConversationHandler.END
 
             except Exception as e:
                 log.error(prelog() + str(e) + '\n' + traceback.format_exc())
 
-    def add_url(self, update: Update, context: CallbackContext):
+    def _download_file(self, file_path):
+        """Synchronous file download helper, run in executor."""
+        try:
+            request = urllib.request.Request(file_path, headers=HEADERS)
+            status_code = urllib.request.urlopen(request).getcode()
+            if status_code == 200:
+                return urllib.request.urlopen(request).read()
+        except Exception as e:
+            log.error(prelog() + str(e) + '\n' + traceback.format_exc())
+        return None
+
+    async def add_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(update.message.chat.id) in self.whitelist:
             try:
                 user = update.message.chat.id
@@ -961,13 +885,10 @@ class Core(CorePluginBase):
 
                 if is_url(update.message.text):
                     try:
-                        # Download file
-                        request = urllib.request.Request(update.message.text.strip(),
-                                                  headers=HEADERS)
-                        status_code = urllib.request.urlopen(request).getcode()
-                        if status_code == 200:
-                            file_contents = urllib.request.urlopen(request).read()
-                            # Base64 encode file data
+                        loop = asyncio.get_event_loop()
+                        file_contents = await loop.run_in_executor(
+                            None, self._download_url, update.message.text.strip())
+                        if file_contents:
                             metainfo = b64encode(file_contents)
                             if self.opts is None:
                                 self.opts = {}
@@ -976,38 +897,46 @@ class Core(CorePluginBase):
                             tid = component.get('Core').add_torrent_file(None, metainfo, self.opts)
                             r = self.apply_label(tid)
                         else:
-                            update.message.reply_text(STRINGS['download_fail'],
-                                                      reply_markup=ReplyKeyboardRemove())
+                            await update.message.reply_text(STRINGS['download_fail'],
+                                                            reply_markup=ReplyKeyboardRemove())
                     except Exception as e:
-                        update.message.reply_text(STRINGS['download_fail'],
-                                                  reply_markup=ReplyKeyboardRemove())
+                        await update.message.reply_text(STRINGS['download_fail'],
+                                                        reply_markup=ReplyKeyboardRemove())
                         log.error(prelog() + str(e) + '\n' + traceback.format_exc())
                 else:
-                    update.message.reply_text(STRINGS['not_url'],
-                                              reply_markup=ReplyKeyboardRemove())
+                    await update.message.reply_text(STRINGS['not_url'],
+                                                    reply_markup=ReplyKeyboardRemove())
 
                 return ConversationHandler.END
 
             except Exception as e:
                 log.error(prelog() + str(e) + '\n' + traceback.format_exc())
 
-    def add_rss(self, update: Update, context: CallbackContext):
+    def _download_url(self, url):
+        """Synchronous URL download helper, run in executor."""
+        try:
+            request = urllib.request.Request(url, headers=HEADERS)
+            status_code = urllib.request.urlopen(request).getcode()
+            if status_code == 200:
+                return urllib.request.urlopen(request).read()
+        except Exception as e:
+            log.error(prelog() + str(e) + '\n' + traceback.format_exc())
+        return None
+
+    async def add_rss(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             component.get('Core').enable_plugin('YaRSS2')
             self.is_rss = True
-            return self.prepare_rss_feed(update, context)
-            # return self.prepare_categories(update, context)
+            return await self.prepare_rss_feed(update, context)
         except Exception as e:
             log.error(prelog() + str(e) + '\n' + traceback.format_exc())
 
     def apply_label(self, tid):
         try:
             if self.label is not None and self.label != STRINGS['no_label']:
-                # Enable Label plugin
                 component.get('Core').enable_plugin('Label')
                 label_plugin = component.get('CorePlugin.Label')
                 if label_plugin:
-                    # Add label if neccessary
                     if self.label not in label_plugin.get_labels():
                         label_plugin.add(self.label.lower())
                     label_plugin.set_torrent(tid, self.label.lower())
@@ -1028,7 +957,7 @@ class Core(CorePluginBase):
                 if t.get_status(("state",))["state"] == "Downloading":
                     if t.status.download_rate < (self.config['minimum_speed'] * 1024):
                         message = _('Torrent *%(name)s* is slower than minimum speed!') % t.get_status({})
-                        self.telegram_send(message, to=self.notifylist, parse_mode='Markdown')
+                        self._telegram_send_from_twisted(message, to=self.notifylist, parse_mode='Markdown')
         except Exception as e:
             log.error(prelog() + 'Unexpected behavior %s.' % str(e))
         return
@@ -1054,34 +983,24 @@ class Core(CorePluginBase):
             custom_message = False
             torrent = component.get('TorrentManager')[torrent_id]
             torrent_status = torrent.get_status(['name'])
-            # get the torrent added time from get_status
             torrent_added = torrent.get_status(['time_added'])
-            # check if torrent_added time is in the last 5 minutes
-            # if it is, send the message
-            # if it is not, do not send the message
-            # this is to prevent the bot from sending a message when the bot is restarted
-            # and all the torrents are added
-            # this is a hacky way to do it, but it works
-            # if the torrent was added more than 5 minutes ago, do not send the message
+            # Prevent spam on restart: skip if torrent was added more than 5 minutes ago
             if (torrent_added["time_added"] < (time.time() - 300)):
                 return
-            # Check if label shows up here
             log.debug("get_status for {}".format(torrent_id))
             log.debug(torrent_status)
             message = _('Added Torrent *%(name)s*') % torrent_status
             log.info(prelog() + 'Torrent added: %s' % torrent_added)
-            # Check if custom message
             if self.config["message_added"] is not DEFAULT_PREFS["message_added"] \
                and len(self.config["message_added"]) > 0:
                 custom_message = True
                 user_message = self.config["message_added"]
                 if "TORRENTNAME" not in self.config["message_added"]:
                     log.info(prelog() + "Custom message does not contain the torrent name (TORRENTNAME)")
-                    # message = "{}".format(user_message.replace("TORRENTNAME", re.escape(torrent_status["name"])))
                 message = "{}".format(user_message.replace("TORRENTNAME", torrent_status["name"]))
             log.info(prelog() + 'Sending torrent added message to ' +
                      str(self.notifylist))
-            return self.telegram_send('{}'.format(message), to=self.notifylist, parse_mode='Markdown')
+            return self._telegram_send_from_twisted('{}'.format(message), to=self.notifylist, parse_mode='Markdown')
         except Exception as e:
             log.error(prelog() + 'Error in alert %s' % str(e))
 
@@ -1092,22 +1011,19 @@ class Core(CorePluginBase):
             custom_message = False
             torrent = component.get('TorrentManager')[torrent_id]
             torrent_status = torrent.get_status(['name'])
-            # Check if label shows up here
             log.debug("get_status for {}".format(torrent_id))
             log.debug(torrent_status)
             message = _('Finished Downloading *%(name)s*') % torrent_status
-            # Check if custom message
             if self.config["message_finished"] is not DEFAULT_PREFS["message_finished"] \
                and len(self.config["message_finished"]) > 0:
                 custom_message = True
                 user_message = self.config["message_finished"]
                 if "TORRENTNAME" not in self.config["message_finished"]:
                     log.info(prelog() + "Custom message does not contain the torrent name (TORRENTNAME)")
-                    # message = "{}".format(user_message.replace("TORRENTNAME", re.escape(torrent_status["name"])))
                 message = "{}".format(user_message.replace("TORRENTNAME", torrent_status["name"]))
             log.info(prelog() + 'Sending torrent finished message to ' +
                      str(self.notifylist))
-            return self.telegram_send('{}'.format(message), to=self.notifylist, parse_mode='Markdown')
+            return self._telegram_send_from_twisted('{}'.format(message), to=self.notifylist, parse_mode='Markdown')
         except Exception as e:
             log.error(prelog() + 'Error in alert %s' %
                       str(e) + '\n' + traceback.format_exc())
@@ -1140,8 +1056,13 @@ class Core(CorePluginBase):
             self.disable()
             self.enable()
 
+    async def _cmd_reload(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Async wrapper for restart_telegramer command handler."""
+        if str(update.message.chat.id) in self.whitelist:
+            self.restart_telegramer()
+
     @export
-    def restart_telegramer(self):
+    def restart_telegramer(self, *args, **kwargs):
         """Disable and enable plugin"""
         log.info(prelog() + 'Restarting Telegramer plugin')
         self.disable()
@@ -1157,9 +1078,19 @@ class Core(CorePluginBase):
     def telegram_do_test(self):
         """Sends Telegram test message"""
         log.info(prelog() + 'Send test')
-        self.bot.sendSticker(self.config['telegram_user'],
-                             choice(list(STICKERS.values())))
-        self.telegram_send(STRINGS['test_success'], to=self.config['telegram_user'])
+        if self.loop and self.loop.is_running():
+            async def _do_test():
+                await self.bot.send_sticker(
+                    self.config['telegram_user'],
+                    choice(list(STICKERS.values())))
+                await self.telegram_send(
+                    STRINGS['test_success'], to=self.config['telegram_user'])
+
+            future = asyncio.run_coroutine_threadsafe(_do_test(), self.loop)
+            try:
+                future.result(timeout=30)
+            except Exception as e:
+                log.error(prelog() + 'Error in test: %s' % str(e))
 
 
 class YarssData:
