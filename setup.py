@@ -70,7 +70,7 @@ setup(
     packages=packages,
     package_data=__pkg_data__,
     install_requires=[
-        "python-telegram-bot>=20.0,<22.0",
+        "python-telegram-bot>=20.0",
     ],
     entry_points="""[deluge.plugin.core]
 %s = %s:CorePlugin
