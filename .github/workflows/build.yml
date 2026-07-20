@@ -27,9 +27,22 @@ jobs:
         run: |
           pip install pytest pytest-cov hypothesis
           pip install "python-telegram-bot>=20.0"
+          pip install setuptools
 
       - name: Run tests
         run: pytest tests/ -v --tb=short
+
+      - name: Verify egg builds and imports
+        run: |
+          python setup.py bdist_egg
+          # Verify the egg's main module is importable
+          python -c "
+          import sys, zipfile, os
+          egg = [f for f in os.listdir('dist') if f.endswith('.egg')][0]
+          sys.path.insert(0, os.path.join('dist', egg))
+          from telegramer import common
+          print(f'✅ Egg imports OK: {egg}')
+          "
 
   build:
     needs: [test]
