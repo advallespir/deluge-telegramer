@@ -1,1 +1,5 @@
-.github/ @noam09
+# Default owner for everything
+* @advallespir
+
+# CI/CD requires extra review
+.github/ @advallespir

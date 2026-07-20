@@ -212,6 +212,9 @@ class Core(CorePluginBase):
     def enable(self):
         try:
             log.info(prelog() + 'Enable')
+            # Ensure any previous bot instance is fully stopped before starting
+            self._stop_existing_bot()
+
             self.config = deluge.configmanager.ConfigManager('telegramer.conf',
                                                              DEFAULT_PREFS)
             self.whitelist = []
@@ -331,7 +334,10 @@ class Core(CorePluginBase):
                 async def _start_bot():
                     await self.application.initialize()
                     await self.application.start()
-                    await self.application.updater.start_polling(poll_interval=0.05)
+                    await self.application.updater.start_polling(
+                        poll_interval=0.5,
+                        drop_pending_updates=True
+                    )
 
                 future = asyncio.run_coroutine_threadsafe(_start_bot(), self.loop)
                 future.result(timeout=30)  # Block until bot is started
@@ -342,10 +348,47 @@ class Core(CorePluginBase):
     async def error(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.warn('Update "%s" caused error "%s"' % (update, context.error))
 
+    def _stop_existing_bot(self):
+        """Stop any existing bot/application/loop before starting a new one."""
+        try:
+            if self.application and self.loop and self.loop.is_running():
+                log.info(prelog() + 'Stopping existing bot instance before restart')
+
+                async def _stop_bot():
+                    try:
+                        if self.application.updater and self.application.updater.running:
+                            await self.application.updater.stop()
+                        if self.application.running:
+                            await self.application.stop()
+                        await self.application.shutdown()
+                    except Exception as e:
+                        log.error(prelog() + 'Error in _stop_existing_bot: %s' % str(e))
+
+                future = asyncio.run_coroutine_threadsafe(_stop_bot(), self.loop)
+                try:
+                    future.result(timeout=10)
+                except Exception as e:
+                    log.error(prelog() + 'Timeout stopping existing bot: %s' % str(e))
+
+            if self.loop and self.loop.is_running():
+                self.loop.call_soon_threadsafe(self.loop.stop)
+            if self._loop_thread and self._loop_thread.is_alive():
+                self._loop_thread.join(timeout=5)
+
+            self.application = None
+            self.bot = None
+            self.loop = None
+            self._loop_thread = None
+            # Give Telegram servers time to release the polling session
+            time.sleep(1)
+        except Exception as e:
+            log.error(prelog() + '_stop_existing_bot error: %s' % str(e))
+
     def disable(self):
         try:
             if self.check_speed_timer:
                 self.check_speed_timer.stop()
+                self.check_speed_timer = None
             log.info(prelog() + 'Disable')
             reactor.callLater(2, self.disconnect_events)
             self.whitelist = []
@@ -353,10 +396,14 @@ class Core(CorePluginBase):
             # Stop the application on the asyncio loop
             if self.application and self.loop and self.loop.is_running():
                 async def _stop_bot():
-                    if self.application.updater and self.application.updater.running:
-                        await self.application.updater.stop()
-                    await self.application.stop()
-                    await self.application.shutdown()
+                    try:
+                        if self.application.updater and self.application.updater.running:
+                            await self.application.updater.stop()
+                        if self.application.running:
+                            await self.application.stop()
+                        await self.application.shutdown()
+                    except Exception as e:
+                        log.error(prelog() + 'Error in _stop_bot: %s' % str(e))
 
                 future = asyncio.run_coroutine_threadsafe(_stop_bot(), self.loop)
                 try:
@@ -1054,18 +1101,22 @@ class Core(CorePluginBase):
             self.config.save()
             # Restart bot service
             self.disable()
+            time.sleep(2)  # Give Telegram servers time to release the polling session
             self.enable()
 
     async def _cmd_reload(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Async wrapper for restart_telegramer command handler."""
         if str(update.message.chat.id) in self.whitelist:
-            self.restart_telegramer()
+            await update.message.reply_text('Reloading Telegramer plugin...')
+            # Schedule restart outside the bot's own event loop to avoid deadlock
+            reactor.callLater(1, self.restart_telegramer)
 
     @export
     def restart_telegramer(self, *args, **kwargs):
         """Disable and enable plugin"""
         log.info(prelog() + 'Restarting Telegramer plugin')
         self.disable()
+        time.sleep(2)  # Give Telegram servers time to release the polling session
         self.enable()
 
     @export

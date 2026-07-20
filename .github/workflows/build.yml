@@ -3,12 +3,60 @@ name: Build and Release
 on:
   push:
     branches: [master]
-    tags: ['v*']
+    tags: ["v*"]
   pull_request:
     branches: [master]
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          pip install pytest pytest-cov hypothesis
+          pip install "python-telegram-bot>=20.0"
+          pip install setuptools
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+      - name: Verify egg builds correctly
+        run: |
+          python setup.py bdist_egg
+          # Verify the egg was created and has correct structure
+          EGG_FILE=$(ls dist/*.egg)
+          python -c "
+          import zipfile, sys
+          egg = '${EGG_FILE}'
+          with zipfile.ZipFile(egg) as z:
+              names = z.namelist()
+              # Verify essential files exist in the egg
+              assert any('telegramer/core.py' in n for n in names), 'Missing core.py'
+              assert any('telegramer/__init__.py' in n for n in names), 'Missing __init__.py'
+              assert any('EGG-INFO/entry_points.txt' in n for n in names), 'Missing entry_points'
+              # Verify entry_points reference correct modules
+              ep = z.read([n for n in names if 'entry_points.txt' in n][0]).decode()
+              assert 'deluge.plugin.core' in ep, 'Missing core entry point'
+              assert 'deluge.plugin.web' in ep, 'Missing web entry point'
+              print(f'✅ Egg structure OK: {egg}')
+              print(f'   Files: {len(names)}')
+          "
+          echo "✅ Egg verification passed"
+
   build:
+    needs: [test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
