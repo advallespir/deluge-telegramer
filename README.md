@@ -6,22 +6,24 @@
 
 > ⚠️ **This fork does NOT work with Deluge 1.x or 2.1.x.** Deluge 2.2.0 uses a completely different plugin scanning mechanism (`importlib.metadata` + `Distribution.at()`) that is incompatible with older versions.
 
+> ⚠️ **setuptools version issue:** The `linuxserver/mods:universal-package-install` mod auto-upgrades setuptools to v83+, which removes `pkg_resources` and **breaks Deluge**. You must pin `setuptools==81.0.0` in your `INSTALL_PIP_PACKAGES` to prevent this. See the docker-compose example below.
+
 ---
 
-* [Requirements](#requirements)
-* [Installation](#installation)
-* [Bot Setup](#bot-setup)
-* [Commands](#commands)
-* [Troubleshooting](#troubleshooting)
-* [Screenshots](#screenshots)
-* [License](#license)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Bot Setup](#bot-setup)
+- [Commands](#commands)
+- [Troubleshooting](#troubleshooting)
+- [Screenshots](#screenshots)
+- [License](#license)
 
 ## Requirements
 
-| Dependency | Version |
-|---|---|
-| Deluge | **2.2.0+** |
-| Python | **3.11+** |
+| Dependency          | Version    |
+| ------------------- | ---------- |
+| Deluge              | **2.2.0+** |
+| Python              | **3.11+**  |
 | python-telegram-bot | **>=20.0** |
 
 ## Installation
@@ -35,14 +37,14 @@ deluge:
   image: lscr.io/linuxserver/deluge:latest
   environment:
     - DOCKER_MODS=linuxserver/mods:universal-package-install
-    - INSTALL_PIP_PACKAGES=python-telegram-bot>=20.0
+    - INSTALL_PIP_PACKAGES=setuptools==81.0.0|python-telegram-bot>=20.0
     - PYTHONPATH=/lsiopy/lib/python3.12/site-packages
   volumes:
     - ./config/Deluge:/config
 ```
 
 - `DOCKER_MODS` enables pip package installation on container start.
-- `INSTALL_PIP_PACKAGES` installs the Telegram bot library.
+- `INSTALL_PIP_PACKAGES` installs the Telegram bot library and **pins setuptools to 81.0.0** (v83+ removes `pkg_resources` which Deluge needs).
 - `PYTHONPATH` ensures Deluge can find pip-installed packages at runtime (linuxserver installs them under `/lsiopy/`).
 
 #### 2. Download the egg
@@ -96,15 +98,15 @@ Go to **Preferences → Plugins** and enable **Telegramer**.
 
 ## Commands
 
-| Command | Description |
-|---|---|
-| `/help` | Show available commands |
-| `/list` | List all torrents |
-| `/down` | List downloading torrents |
-| `/up` | List uploading/seeding torrents |
-| `/add` | Add a torrent (magnet, URL, or .torrent file) |
-| `/cancel` | Cancel current operation |
-| `/rss` | Add RSS filter (requires YaRSS2 plugin) |
+| Command   | Description                                   |
+| --------- | --------------------------------------------- |
+| `/help`   | Show available commands                       |
+| `/list`   | List all torrents                             |
+| `/down`   | List downloading torrents                     |
+| `/up`     | List uploading/seeding torrents               |
+| `/add`    | Add a torrent (magnet, URL, or .torrent file) |
+| `/cancel` | Cancel current operation                      |
+| `/rss`    | Add RSS filter (requires YaRSS2 plugin)       |
 
 **Categories**: Configure category/directory pairs in Telegramer preferences. When adding a torrent, the bot will prompt you to pick a category and move the completed download to the matching directory.
 
