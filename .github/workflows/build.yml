@@ -32,17 +32,28 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v --tb=short
 
-      - name: Verify egg builds and imports
+      - name: Verify egg builds correctly
         run: |
           python setup.py bdist_egg
-          # Verify the egg's main module is importable
+          # Verify the egg was created and has correct structure
+          EGG_FILE=$(ls dist/*.egg)
           python -c "
-          import sys, zipfile, os
-          egg = [f for f in os.listdir('dist') if f.endswith('.egg')][0]
-          sys.path.insert(0, os.path.join('dist', egg))
-          from telegramer import common
-          print(f'✅ Egg imports OK: {egg}')
+          import zipfile, sys
+          egg = '${EGG_FILE}'
+          with zipfile.ZipFile(egg) as z:
+              names = z.namelist()
+              # Verify essential files exist in the egg
+              assert any('telegramer/core.py' in n for n in names), 'Missing core.py'
+              assert any('telegramer/__init__.py' in n for n in names), 'Missing __init__.py'
+              assert any('EGG-INFO/entry_points.txt' in n for n in names), 'Missing entry_points'
+              # Verify entry_points reference correct modules
+              ep = z.read([n for n in names if 'entry_points.txt' in n][0]).decode()
+              assert 'deluge.plugin.core' in ep, 'Missing core entry point'
+              assert 'deluge.plugin.web' in ep, 'Missing web entry point'
+              print(f'✅ Egg structure OK: {egg}')
+              print(f'   Files: {len(names)}')
           "
+          echo "✅ Egg verification passed"
 
   build:
     needs: [test]
